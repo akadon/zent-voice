@@ -1,6 +1,7 @@
 import { eq, and } from "drizzle-orm";
 import { db, schema } from "../db/index.js";
 import { ApiError } from "./voicestate.js";
+import { generateId } from "../utils/snowflake.js";
 
 export interface SoundboardSound {
   id: string;
@@ -16,12 +17,6 @@ export interface SoundboardSound {
 }
 
 const MAX_SOUND_NAME_LENGTH = 32;
-
-function generateId(): string {
-  const timestamp = BigInt(Date.now() - 1704067200000) << 22n;
-  const random = BigInt(Math.floor(Math.random() * 4096));
-  return (timestamp | random).toString();
-}
 
 export async function getGuildSounds(guildId: string): Promise<SoundboardSound[]> {
   return db

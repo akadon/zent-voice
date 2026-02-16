@@ -1,14 +1,7 @@
 import type { FastifyInstance } from "fastify";
 import { z } from "zod";
 import * as stageService from "../services/stage.js";
-import { redisPub } from "../config/redis.js";
-
-async function dispatchGuild(guildId: string, event: string, data: unknown) {
-  await redisPub.publish(
-    `gateway:guild:${guildId}`,
-    JSON.stringify({ event, data })
-  );
-}
+import { dispatchGuild } from "../utils/dispatch.js";
 
 export async function stageRoutes(app: FastifyInstance) {
   // Create stage instance
@@ -60,8 +53,22 @@ export async function stageRoutes(app: FastifyInstance) {
       })
       .parse(request.body);
 
-    const instance = await stageService.updateStageInstance(channelId, body);
-    await dispatchGuild(body.guildId, "STAGE_INSTANCE_UPDATE", instance);
+    const { guildId, ...updateData } = body;
+    if (Object.keys(updateData).length === 0) {
+      return reply.status(400).send({ statusCode: 400, message: "Empty body" });
+    }
+
+    // Verify the stage instance belongs to the guild
+    const existing = await stageService.getStageInstance(channelId);
+    if (!existing) {
+      return reply.status(404).send({ statusCode: 404, message: "Stage instance not found" });
+    }
+    if (existing.guildId !== guildId) {
+      return reply.status(403).send({ statusCode: 403, message: "Stage instance does not belong to this guild" });
+    }
+
+    const instance = await stageService.updateStageInstance(channelId, updateData);
+    await dispatchGuild(guildId, "STAGE_INSTANCE_UPDATE", instance);
     return reply.send(instance);
   });
 
@@ -69,6 +76,15 @@ export async function stageRoutes(app: FastifyInstance) {
   app.delete("/stage-instances/:channelId", async (request, reply) => {
     const { channelId } = request.params as { channelId: string };
     const body = z.object({ guildId: z.string() }).parse(request.body);
+
+    // Verify the stage instance belongs to the guild
+    const existing = await stageService.getStageInstance(channelId);
+    if (!existing) {
+      return reply.status(404).send({ statusCode: 404, message: "Stage instance not found" });
+    }
+    if (existing.guildId !== body.guildId) {
+      return reply.status(403).send({ statusCode: 403, message: "Stage instance does not belong to this guild" });
+    }
 
     const instance = await stageService.deleteStageInstance(channelId);
     await dispatchGuild(body.guildId, "STAGE_INSTANCE_DELETE", instance);
@@ -80,6 +96,14 @@ export async function stageRoutes(app: FastifyInstance) {
     const { channelId } = request.params as { channelId: string };
     const body = z.object({ userId: z.string(), guildId: z.string() }).parse(request.body);
 
+    const existing = await stageService.getStageInstance(channelId);
+    if (!existing) {
+      return reply.status(404).send({ statusCode: 404, message: "Stage instance not found" });
+    }
+    if (existing.guildId !== body.guildId) {
+      return reply.status(403).send({ statusCode: 403, message: "Stage instance does not belong to this guild" });
+    }
+
     await stageService.requestToSpeak(body.userId, body.guildId, channelId);
     return reply.status(204).send();
   });
@@ -88,6 +112,14 @@ export async function stageRoutes(app: FastifyInstance) {
   app.post("/stage-instances/:channelId/speakers/:userId", async (request, reply) => {
     const { channelId, userId } = request.params as { channelId: string; userId: string };
     const body = z.object({ guildId: z.string() }).parse(request.body);
+
+    const existing = await stageService.getStageInstance(channelId);
+    if (!existing) {
+      return reply.status(404).send({ statusCode: 404, message: "Stage instance not found" });
+    }
+    if (existing.guildId !== body.guildId) {
+      return reply.status(403).send({ statusCode: 403, message: "Stage instance does not belong to this guild" });
+    }
 
     await stageService.inviteToSpeak(userId, body.guildId, channelId);
     await dispatchGuild(body.guildId, "VOICE_STATE_UPDATE", {
@@ -103,6 +135,14 @@ export async function stageRoutes(app: FastifyInstance) {
   app.delete("/stage-instances/:channelId/speakers/:userId", async (request, reply) => {
     const { channelId, userId } = request.params as { channelId: string; userId: string };
     const body = z.object({ guildId: z.string() }).parse(request.body);
+
+    const existing = await stageService.getStageInstance(channelId);
+    if (!existing) {
+      return reply.status(404).send({ statusCode: 404, message: "Stage instance not found" });
+    }
+    if (existing.guildId !== body.guildId) {
+      return reply.status(403).send({ statusCode: 403, message: "Stage instance does not belong to this guild" });
+    }
 
     await stageService.moveToAudience(userId, body.guildId, channelId);
     await dispatchGuild(body.guildId, "VOICE_STATE_UPDATE", {

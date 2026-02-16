@@ -1,4 +1,4 @@
-import { eq, and } from "drizzle-orm";
+import { eq, and, sql } from "drizzle-orm";
 import { db, schema } from "../db/index.js";
 import { env } from "../config/env.js";
 import crypto from "crypto";
@@ -18,7 +18,7 @@ function createLiveKitToken(roomName: string, participantId: string, participant
       iss: env.LIVEKIT_API_KEY,
       sub: participantId,
       nbf: now,
-      exp: now + 86400,
+      exp: now + 4 * 60 * 60,
       iat: now,
       jti: crypto.randomUUID(),
       video: {
@@ -56,28 +56,33 @@ export async function joinVoiceChannel(
   }
 
   await db.transaction(async (tx) => {
-    if (userLimit && userLimit > 0) {
-      const currentUsers = await tx
-        .select()
-        .from(schema.voiceStates)
-        .where(eq(schema.voiceStates.channelId, channelId));
-      if (currentUsers.length >= userLimit) {
-        throw new ApiError(400, "Voice channel is full");
-      }
-    }
-
+    // Remove existing voice state for this user in this guild atomically
     await tx
       .delete(schema.voiceStates)
       .where(and(eq(schema.voiceStates.userId, userId), eq(schema.voiceStates.guildId, guildId)));
 
-    await tx.insert(schema.voiceStates).values({
-      userId,
-      guildId,
-      channelId,
-      sessionId,
-      selfMute: options?.selfMute ?? false,
-      selfDeaf: options?.selfDeaf ?? false,
-    });
+    if (userLimit && userLimit > 0) {
+      // Use INSERT ... SELECT with count check to atomically insert only if under limit
+      const result = await tx.execute(sql`
+        INSERT INTO voice_states (user_id, guild_id, channel_id, session_id, self_mute, self_deaf)
+        SELECT ${userId}, ${guildId}, ${channelId}, ${sessionId},
+               ${options?.selfMute ?? false}, ${options?.selfDeaf ?? false}
+        WHERE (SELECT count(*) FROM voice_states WHERE channel_id = ${channelId}) < ${userLimit}
+        RETURNING *
+      `);
+      if (!result || (result as any[]).length === 0) {
+        throw new ApiError(400, "Voice channel is full");
+      }
+    } else {
+      await tx.insert(schema.voiceStates).values({
+        userId,
+        guildId,
+        channelId,
+        sessionId,
+        selfMute: options?.selfMute ?? false,
+        selfDeaf: options?.selfDeaf ?? false,
+      });
+    }
   });
 
   const roomName = `voice-${guildId}-${channelId}`;

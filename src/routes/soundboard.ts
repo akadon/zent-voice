@@ -1,14 +1,7 @@
 import type { FastifyInstance } from "fastify";
 import { z } from "zod";
 import * as soundboardService from "../services/soundboard.js";
-import { redisPub } from "../config/redis.js";
-
-async function dispatchGuild(guildId: string, event: string, data: unknown) {
-  await redisPub.publish(
-    `gateway:guild:${guildId}`,
-    JSON.stringify({ event, data })
-  );
-}
+import { dispatchGuild } from "../utils/dispatch.js";
 
 export async function soundboardRoutes(app: FastifyInstance) {
   // Get guild sounds
@@ -66,6 +59,10 @@ export async function soundboardRoutes(app: FastifyInstance) {
         emojiName: z.string().nullable().optional(),
       })
       .parse(request.body);
+
+    if (!body || Object.keys(body).length === 0) {
+      return reply.status(400).send({ statusCode: 400, message: "Empty body" });
+    }
 
     const sound = await soundboardService.updateSound(guildId, soundId, body);
     await dispatchGuild(guildId, "GUILD_SOUNDBOARD_SOUND_UPDATE", sound);

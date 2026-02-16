@@ -1,7 +1,8 @@
 import { eq, and } from "drizzle-orm";
 import { db, schema } from "../db/index.js";
 import { ApiError } from "./voicestate.js";
-import crypto from "crypto";
+import { generateId } from "../utils/snowflake.js";
+import { dispatchGuild } from "../utils/dispatch.js";
 
 export interface StageInstance {
   id: string;
@@ -17,13 +18,6 @@ export const StagePrivacyLevel = {
   PUBLIC: 1,
   GUILD_ONLY: 2,
 } as const;
-
-// Snowflake-like ID generation (simplified)
-function generateId(): string {
-  const timestamp = BigInt(Date.now() - 1704067200000) << 22n;
-  const random = BigInt(Math.floor(Math.random() * 4096));
-  return (timestamp | random).toString();
-}
 
 export async function getStageInstance(channelId: string): Promise<StageInstance | null> {
   const [instance] = await db
@@ -134,6 +128,13 @@ export async function requestToSpeak(
   if (!voiceState) {
     throw new ApiError(400, "User is not in this voice channel");
   }
+
+  await dispatchGuild(guildId, "VOICE_STATE_UPDATE", {
+    userId,
+    guildId,
+    channelId,
+    requestToSpeakTimestamp: new Date().toISOString(),
+  });
 }
 
 export async function inviteToSpeak(

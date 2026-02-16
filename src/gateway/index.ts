@@ -1,5 +1,6 @@
 import { Server as SocketIOServer } from "socket.io";
 import type { Server as HttpServer } from "http";
+import crypto from "crypto";
 import { env } from "../config/env.js";
 import { redisSub } from "../config/redis.js";
 import * as voicestateService from "../services/voicestate.js";
@@ -8,6 +9,26 @@ interface VoiceGatewaySession {
   userId: string;
   sessionId: string;
   guildIds: string[];
+}
+
+function verifyToken(token: string): boolean {
+  if (token === env.INTERNAL_API_KEY) return true;
+
+  // Try JWT validation with AUTH_SECRET
+  try {
+    const parts = token.split(".");
+    if (parts.length !== 3) return false;
+    const sig = crypto
+      .createHmac("sha256", env.AUTH_SECRET)
+      .update(`${parts[0]}.${parts[1]}`)
+      .digest("base64url");
+    if (sig !== parts[2]) return false;
+    const payload = JSON.parse(Buffer.from(parts[1], "base64url").toString());
+    if (payload.exp && payload.exp < Math.floor(Date.now() / 1000)) return false;
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 export function createVoiceGateway(httpServer: HttpServer) {
@@ -21,6 +42,23 @@ export function createVoiceGateway(httpServer: HttpServer) {
   });
 
   const sessions = new Map<string, VoiceGatewaySession>();
+
+  // Authenticate connections
+  io.use((socket, next) => {
+    const token =
+      socket.handshake.auth?.token ??
+      socket.handshake.query?.token;
+
+    if (typeof token !== "string" || !token) {
+      return next(new Error("unauthorized"));
+    }
+
+    if (!verifyToken(token)) {
+      return next(new Error("unauthorized"));
+    }
+
+    next();
+  });
 
   // Subscribe to voice events from Redis
   redisSub.psubscribe("gateway:guild:*");
@@ -73,6 +111,12 @@ export function createVoiceGateway(httpServer: HttpServer) {
       selfDeaf?: boolean;
     }) => {
       if (!session) return;
+
+      // Verify guild membership before allowing voice state changes
+      if (!session.guildIds.includes(data.guildId)) {
+        socket.emit("error", { code: 4003, message: "Not a member of this guild" });
+        return;
+      }
 
       if (data.channelId === null) {
         const previous = await voicestateService.leaveVoiceChannel(session.userId, data.guildId);

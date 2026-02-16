@@ -2,14 +2,7 @@ import crypto from "crypto";
 import type { FastifyInstance } from "fastify";
 import { z } from "zod";
 import * as voicestateService from "../services/voicestate.js";
-import { redisPub } from "../config/redis.js";
-
-async function dispatchGuild(guildId: string, event: string, data: unknown) {
-  await redisPub.publish(
-    `gateway:guild:${guildId}`,
-    JSON.stringify({ event, data })
-  );
-}
+import { dispatchGuild } from "../utils/dispatch.js";
 
 export async function voiceRoutes(app: FastifyInstance) {
   // Join voice channel
@@ -83,6 +76,10 @@ export async function voiceRoutes(app: FastifyInstance) {
       })
       .parse(request.body);
 
+    if (!body || Object.keys(body).length === 0) {
+      return reply.status(400).send({ statusCode: 400, message: "Empty body" });
+    }
+
     const updated = await voicestateService.updateVoiceState(userId, guildId, body);
     await dispatchGuild(guildId, "VOICE_STATE_UPDATE", updated);
     return reply.send(updated);
@@ -97,6 +94,10 @@ export async function voiceRoutes(app: FastifyInstance) {
         deaf: z.boolean().optional(),
       })
       .parse(request.body);
+
+    if (!body || Object.keys(body).length === 0) {
+      return reply.status(400).send({ statusCode: 400, message: "Empty body" });
+    }
 
     const updated = await voicestateService.serverMuteDeafen(userId, guildId, body);
     await dispatchGuild(guildId, "VOICE_STATE_UPDATE", updated);
