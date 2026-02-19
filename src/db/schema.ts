@@ -1,21 +1,23 @@
 import {
-  pgTable,
+  mysqlTable,
+  varchar,
   text,
-  integer,
+  int,
   boolean,
-  timestamp,
+  datetime,
   primaryKey,
   index,
-} from "drizzle-orm/pg-core";
+} from "drizzle-orm/mysql-core";
+import { sql } from "drizzle-orm";
 
 // ── Voice States ──
-export const voiceStates = pgTable(
+export const voiceStates = mysqlTable(
   "voice_states",
   {
-    userId: text("user_id").notNull(),
-    guildId: text("guild_id").notNull(),
-    channelId: text("channel_id"),
-    sessionId: text("session_id").notNull(),
+    userId: varchar("user_id", { length: 64 }).notNull(),
+    guildId: varchar("guild_id", { length: 64 }).notNull(),
+    channelId: varchar("channel_id", { length: 64 }),
+    sessionId: varchar("session_id", { length: 64 }).notNull(),
     deaf: boolean("deaf").notNull().default(false),
     mute: boolean("mute").notNull().default(false),
     selfDeaf: boolean("self_deaf").notNull().default(false),
@@ -31,15 +33,15 @@ export const voiceStates = pgTable(
 );
 
 // ── Stage Instances ──
-export const stageInstances = pgTable(
+export const stageInstances = mysqlTable(
   "stage_instances",
   {
-    id: text("id").primaryKey(),
-    guildId: text("guild_id").notNull(),
-    channelId: text("channel_id").notNull(),
+    id: varchar("id", { length: 64 }).primaryKey(),
+    guildId: varchar("guild_id", { length: 64 }).notNull(),
+    channelId: varchar("channel_id", { length: 64 }).notNull(),
     topic: text("topic").notNull(),
-    privacyLevel: integer("privacy_level").notNull().default(2),
-    guildScheduledEventId: text("guild_scheduled_event_id"),
+    privacyLevel: int("privacy_level").notNull().default(2),
+    guildScheduledEventId: varchar("guild_scheduled_event_id", { length: 64 }),
     discoverableDisabled: boolean("discoverable_disabled").notNull().default(false),
   },
   (table) => [
@@ -48,44 +50,44 @@ export const stageInstances = pgTable(
 );
 
 // ── Soundboard Sounds ──
-export const soundboardSounds = pgTable(
+export const soundboardSounds = mysqlTable(
   "soundboard_sounds",
   {
-    id: text("id").primaryKey(),
-    guildId: text("guild_id").notNull(),
-    name: text("name").notNull(),
-    volume: integer("volume").notNull().default(100),
-    emojiId: text("emoji_id"),
-    emojiName: text("emoji_name"),
-    userId: text("user_id"),
+    id: varchar("id", { length: 64 }).primaryKey(),
+    guildId: varchar("guild_id", { length: 64 }).notNull(),
+    name: varchar("name", { length: 255 }).notNull(),
+    volume: int("volume").notNull().default(100),
+    emojiId: varchar("emoji_id", { length: 64 }),
+    emojiName: varchar("emoji_name", { length: 255 }),
+    userId: varchar("user_id", { length: 64 }),
     available: boolean("available").notNull().default(true),
     soundUrl: text("sound_url").notNull(),
-    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    createdAt: datetime("created_at", { mode: "date" }).notNull().default(sql`NOW()`),
   },
   (table) => [index("soundboard_sounds_guild_idx").on(table.guildId)]
 );
 
 // ── User Soundboard Favorites ──
-export const userSoundboardFavorites = pgTable(
+export const userSoundboardFavorites = mysqlTable(
   "user_soundboard_favorites",
   {
-    userId: text("user_id").notNull(),
-    soundId: text("sound_id").notNull(),
+    userId: varchar("user_id", { length: 64 }).notNull(),
+    soundId: varchar("sound_id", { length: 64 }).notNull(),
   },
   (table) => [primaryKey({ columns: [table.userId, table.soundId] })]
 );
 
 // ── Voice Channel Spatial Positions ──
-export const voiceSpatialPositions = pgTable(
+export const voiceSpatialPositions = mysqlTable(
   "voice_spatial_positions",
   {
-    sessionId: text("session_id").notNull(),
-    userId: text("user_id").notNull(),
-    channelId: text("channel_id").notNull(),
-    x: integer("x").notNull().default(0),
-    y: integer("y").notNull().default(0),
-    z: integer("z").notNull().default(0),
-    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+    sessionId: varchar("session_id", { length: 64 }).notNull(),
+    userId: varchar("user_id", { length: 64 }).notNull(),
+    channelId: varchar("channel_id", { length: 64 }).notNull(),
+    x: int("x").notNull().default(0),
+    y: int("y").notNull().default(0),
+    z: int("z").notNull().default(0),
+    updatedAt: datetime("updated_at", { mode: "date" }).notNull().default(sql`NOW()`),
   },
   (table) => [
     primaryKey({ columns: [table.sessionId, table.userId, table.channelId] }),

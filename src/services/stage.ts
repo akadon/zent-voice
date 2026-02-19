@@ -52,7 +52,7 @@ export async function createStageInstance(
   }
 
   const id = generateId();
-  const [instance] = await db
+  await db
     .insert(schema.stageInstances)
     .values({
       id,
@@ -62,8 +62,13 @@ export async function createStageInstance(
       privacyLevel: data.privacyLevel ?? StagePrivacyLevel.GUILD_ONLY,
       guildScheduledEventId: data.guildScheduledEventId ?? null,
       discoverableDisabled: false,
-    })
-    .returning();
+    });
+
+  const [instance] = await db
+    .select()
+    .from(schema.stageInstances)
+    .where(eq(schema.stageInstances.id, id))
+    .limit(1);
 
   if (!instance) {
     throw new ApiError(500, "Failed to create stage instance");
@@ -79,14 +84,19 @@ export async function updateStageInstance(
     privacyLevel?: number;
   }
 ): Promise<StageInstance> {
-  const [instance] = await db
+  await db
     .update(schema.stageInstances)
     .set({
       ...(data.topic !== undefined && { topic: data.topic }),
       ...(data.privacyLevel !== undefined && { privacyLevel: data.privacyLevel }),
     })
+    .where(eq(schema.stageInstances.channelId, channelId));
+
+  const [instance] = await db
+    .select()
+    .from(schema.stageInstances)
     .where(eq(schema.stageInstances.channelId, channelId))
-    .returning();
+    .limit(1);
 
   if (!instance) {
     throw new ApiError(404, "Stage instance not found");
@@ -97,13 +107,18 @@ export async function updateStageInstance(
 
 export async function deleteStageInstance(channelId: string): Promise<StageInstance> {
   const [instance] = await db
-    .delete(schema.stageInstances)
+    .select()
+    .from(schema.stageInstances)
     .where(eq(schema.stageInstances.channelId, channelId))
-    .returning();
+    .limit(1);
 
   if (!instance) {
     throw new ApiError(404, "Stage instance not found");
   }
+
+  await db
+    .delete(schema.stageInstances)
+    .where(eq(schema.stageInstances.channelId, channelId));
 
   return instance;
 }

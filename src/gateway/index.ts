@@ -85,6 +85,23 @@ export function createVoiceGateway(httpServer: HttpServer) {
         return;
       }
 
+      // Validate userId from token matches the claimed userId
+      const token = socket.handshake.auth?.token ?? socket.handshake.query?.token;
+      if (typeof token === "string" && token !== env.INTERNAL_API_KEY) {
+        try {
+          const parts = token.split(".");
+          if (parts.length === 3) {
+            const payload = JSON.parse(Buffer.from(parts[1]!, "base64url").toString());
+            if (payload.userId && payload.userId !== data.userId) {
+              socket.emit("error", { code: 4002, message: "userId mismatch" });
+              return;
+            }
+          }
+        } catch {
+          // Token already validated in middleware, skip
+        }
+      }
+
       const guildIds = data.guildIds.slice(0, 200);
 
       session = {

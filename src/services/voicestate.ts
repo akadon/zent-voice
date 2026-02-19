@@ -62,17 +62,22 @@ export async function joinVoiceChannel(
       .where(and(eq(schema.voiceStates.userId, userId), eq(schema.voiceStates.guildId, guildId)));
 
     if (userLimit && userLimit > 0) {
-      // Use INSERT ... SELECT with count check to atomically insert only if under limit
-      const result = await tx.execute(sql`
-        INSERT INTO voice_states (user_id, guild_id, channel_id, session_id, self_mute, self_deaf)
-        SELECT ${userId}, ${guildId}, ${channelId}, ${sessionId},
-               ${options?.selfMute ?? false}, ${options?.selfDeaf ?? false}
-        WHERE (SELECT count(*) FROM voice_states WHERE channel_id = ${channelId}) < ${userLimit}
-        RETURNING *
+      // Check count then insert (MySQL doesn't support INSERT...SELECT...RETURNING)
+      const [countResult] = await tx.execute(sql`
+        SELECT COUNT(*) as cnt FROM voice_states WHERE channel_id = ${channelId}
       `);
-      if (!result || (result as any[]).length === 0) {
+      const count = (countResult as any).cnt;
+      if (count >= userLimit) {
         throw new ApiError(400, "Voice channel is full");
       }
+      await tx.insert(schema.voiceStates).values({
+        userId,
+        guildId,
+        channelId,
+        sessionId,
+        selfMute: options?.selfMute ?? false,
+        selfDeaf: options?.selfDeaf ?? false,
+      });
     } else {
       await tx.insert(schema.voiceStates).values({
         userId,
@@ -131,11 +136,9 @@ export async function updateVoiceState(
     selfVideo?: boolean;
   }
 ) {
-  const [updated] = await db
-    .update(schema.voiceStates)
-    .set(data)
-    .where(and(eq(schema.voiceStates.userId, userId), eq(schema.voiceStates.guildId, guildId)))
-    .returning();
+  const condition = and(eq(schema.voiceStates.userId, userId), eq(schema.voiceStates.guildId, guildId));
+  await db.update(schema.voiceStates).set(data).where(condition);
+  const [updated] = await db.select().from(schema.voiceStates).where(condition);
 
   if (!updated) throw new ApiError(404, "Not in a voice channel");
   return updated;
@@ -146,11 +149,9 @@ export async function serverMuteDeafen(
   guildId: string,
   data: { mute?: boolean; deaf?: boolean }
 ) {
-  const [updated] = await db
-    .update(schema.voiceStates)
-    .set(data)
-    .where(and(eq(schema.voiceStates.userId, userId), eq(schema.voiceStates.guildId, guildId)))
-    .returning();
+  const condition = and(eq(schema.voiceStates.userId, userId), eq(schema.voiceStates.guildId, guildId));
+  await db.update(schema.voiceStates).set(data).where(condition);
+  const [updated] = await db.select().from(schema.voiceStates).where(condition);
 
   if (!updated) throw new ApiError(404, "User not in a voice channel");
   return updated;

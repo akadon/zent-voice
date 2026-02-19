@@ -85,6 +85,53 @@ export async function voiceRoutes(app: FastifyInstance) {
     return reply.send(updated);
   });
 
+  // Update spatial audio position
+  app.patch("/voice/:guildId/:channelId/spatial", async (request, reply) => {
+    const { guildId, channelId } = request.params as { guildId: string; channelId: string };
+    const body = z
+      .object({
+        userId: z.string(),
+        x: z.number(),
+        y: z.number(),
+        z: z.number(),
+      })
+      .parse(request.body);
+
+    const key = `spatial:${guildId}:${channelId}:${body.userId}`;
+    const { redis } = await import("../config/redis.js");
+    await redis.set(key, JSON.stringify({ x: body.x, y: body.y, z: body.z }), "EX", 300);
+
+    await dispatchGuild(guildId, "VOICE_SPATIAL_UPDATE", {
+      guildId,
+      channelId,
+      userId: body.userId,
+      position: { x: body.x, y: body.y, z: body.z },
+    });
+
+    return reply.status(204).send();
+  });
+
+  // Get spatial audio positions for a channel
+  app.get("/voice/:guildId/:channelId/spatial/positions", async (request, reply) => {
+    const { guildId, channelId } = request.params as { guildId: string; channelId: string };
+
+    const states = await voicestateService.getGuildVoiceStates(guildId);
+    const channelStates = states.filter((s: any) => s.channelId === channelId);
+
+    const { redis } = await import("../config/redis.js");
+    const positions: Array<{ userId: string; x: number; y: number; z: number }> = [];
+    for (const state of channelStates) {
+      const key = `spatial:${guildId}:${channelId}:${state.userId}`;
+      const pos = await redis.get(key);
+      if (pos) {
+        const parsed = JSON.parse(pos);
+        positions.push({ userId: state.userId, ...parsed });
+      }
+    }
+
+    return reply.send(positions);
+  });
+
   // Server mute/deafen
   app.patch("/voice/:guildId/:userId/server", async (request, reply) => {
     const { guildId, userId } = request.params as { guildId: string; userId: string };

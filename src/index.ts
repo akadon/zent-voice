@@ -1,5 +1,6 @@
 import Fastify from "fastify";
 import cors from "@fastify/cors";
+import crypto from "crypto";
 import { createServer } from "http";
 import { env } from "./config/env.js";
 import { voiceRoutes } from "./routes/voice.js";
@@ -29,6 +30,11 @@ await app.register(cors, {
 });
 
 app.addHook("onRequest", async (request, reply) => {
+  // Request ID tracing
+  const requestId = (request.headers["x-request-id"] as string) ?? crypto.randomUUID();
+  reply.header("x-request-id", requestId);
+  (request as any).requestId = requestId;
+
   if (request.url === "/health") return;
   await internalAuth(request, reply);
 });

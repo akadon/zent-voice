@@ -1,4 +1,4 @@
-import { eq, and } from "drizzle-orm";
+import { eq, and, sql } from "drizzle-orm";
 import { db, schema } from "../db/index.js";
 import { ApiError } from "./voicestate.js";
 import { generateId } from "../utils/snowflake.js";
@@ -60,7 +60,7 @@ export async function createSound(
 
   const id = generateId();
 
-  const [sound] = await db
+  await db
     .insert(schema.soundboardSounds)
     .values({
       id,
@@ -72,8 +72,13 @@ export async function createSound(
       emojiName: data.emojiName ?? null,
       userId,
       available: true,
-    })
-    .returning();
+    });
+
+  const [sound] = await db
+    .select()
+    .from(schema.soundboardSounds)
+    .where(eq(schema.soundboardSounds.id, id))
+    .limit(1);
 
   if (!sound) {
     throw new ApiError(500, "Failed to create sound");
@@ -101,7 +106,7 @@ export async function updateSound(
     updateData.volume = Math.min(100, Math.max(0, data.volume));
   }
 
-  const [sound] = await db
+  await db
     .update(schema.soundboardSounds)
     .set(updateData)
     .where(
@@ -109,8 +114,13 @@ export async function updateSound(
         eq(schema.soundboardSounds.id, soundId),
         eq(schema.soundboardSounds.guildId, guildId)
       )
-    )
-    .returning();
+    );
+
+  const [sound] = await db
+    .select()
+    .from(schema.soundboardSounds)
+    .where(eq(schema.soundboardSounds.id, soundId))
+    .limit(1);
 
   if (!sound) {
     throw new ApiError(404, "Sound not found");
@@ -120,19 +130,29 @@ export async function updateSound(
 }
 
 export async function deleteSound(guildId: string, soundId: string): Promise<void> {
-  const result = await db
-    .delete(schema.soundboardSounds)
+  const [existing] = await db
+    .select()
+    .from(schema.soundboardSounds)
     .where(
       and(
         eq(schema.soundboardSounds.id, soundId),
         eq(schema.soundboardSounds.guildId, guildId)
       )
     )
-    .returning();
+    .limit(1);
 
-  if (result.length === 0) {
+  if (!existing) {
     throw new ApiError(404, "Sound not found");
   }
+
+  await db
+    .delete(schema.soundboardSounds)
+    .where(
+      and(
+        eq(schema.soundboardSounds.id, soundId),
+        eq(schema.soundboardSounds.guildId, guildId)
+      )
+    );
 }
 
 export async function getUserFavorites(userId: string): Promise<SoundboardSound[]> {
@@ -160,8 +180,7 @@ export async function addFavorite(userId: string, soundId: string): Promise<void
       soundId,
     });
   } catch (error: any) {
-    if (error?.code === "23505") {
-      // Already favorited - ignore duplicate key
+    if (error?.code === "ER_DUP_ENTRY" || error?.errno === 1062) {
       return;
     }
     throw error;
