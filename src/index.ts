@@ -70,7 +70,7 @@ app.get("/health", async (_request, reply) => {
   try {
     await db.execute(sql`SELECT 1`);
     await redisPub.ping();
-    return { status: "ok", service: "voice" };
+    return { status: "ok", service: "stream" };
   } catch {
     return reply.status(503).send({ statusCode: 503, message: "unhealthy" });
   }
@@ -83,7 +83,7 @@ const start = async () => {
     app.decorate("io", io);
 
     await app.listen({ port: env.VOICE_PORT, host: env.VOICE_HOST });
-    app.log.info(`Voice service listening on ${env.VOICE_HOST}:${env.VOICE_PORT}`);
+    app.log.info(`Stream service listening on ${env.VOICE_HOST}:${env.VOICE_PORT}`);
 
     const shutdown = async (signal: string) => {
       app.log.info(`Received ${signal}, shutting down`);
