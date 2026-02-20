@@ -13,7 +13,10 @@ interface VoiceGatewaySession {
 }
 
 function verifyToken(token: string): boolean {
-  if (token === env.INTERNAL_API_KEY) return true;
+  // Constant-time comparison for internal API key
+  const keyBuf = Buffer.from(env.INTERNAL_API_KEY);
+  const tokenBuf = Buffer.from(token);
+  if (keyBuf.length === tokenBuf.length && crypto.timingSafeEqual(keyBuf, tokenBuf)) return true;
 
   // Try JWT validation with AUTH_SECRET
   try {
@@ -90,18 +93,23 @@ export function createVoiceGateway(httpServer: HttpServer) {
 
       // Validate userId from token matches the claimed userId
       const token = socket.handshake.auth?.token ?? socket.handshake.query?.token;
-      if (typeof token === "string" && token !== env.INTERNAL_API_KEY) {
-        try {
-          const parts = token.split(".");
-          if (parts.length === 3) {
-            const payload = JSON.parse(Buffer.from(parts[1]!, "base64url").toString());
-            if (payload.userId && payload.userId !== data.userId) {
-              socket.emit("error", { code: 4002, message: "userId mismatch" });
-              return;
+      if (typeof token === "string") {
+        if (token === env.INTERNAL_API_KEY) {
+          // Internal API key: userId must still be provided and validated via data
+          // but we trust the internal service to provide the correct userId
+        } else {
+          try {
+            const parts = token.split(".");
+            if (parts.length === 3) {
+              const payload = JSON.parse(Buffer.from(parts[1]!, "base64url").toString());
+              if (payload.userId && payload.userId !== data.userId) {
+                socket.emit("error", { code: 4002, message: "userId mismatch" });
+                return;
+              }
             }
+          } catch {
+            // Token already validated in middleware, skip
           }
-        } catch {
-          // Token already validated in middleware, skip
         }
       }
 

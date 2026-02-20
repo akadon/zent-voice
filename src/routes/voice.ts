@@ -170,12 +170,15 @@ export async function voiceRoutes(app: FastifyInstance) {
 
     const { redis } = await import("../config/redis.js");
     const positions: Array<{ userId: string; x: number; y: number; z: number }> = [];
-    for (const state of channelStates) {
-      const key = `spatial:${guildId}:${channelId}:${state.userId}`;
-      const pos = await redis.get(key);
-      if (pos) {
-        const parsed = JSON.parse(pos);
-        positions.push({ userId: state.userId, ...parsed });
+    if (channelStates.length > 0) {
+      const keys = channelStates.map((s: any) => `spatial:${guildId}:${channelId}:${s.userId}`);
+      const values = await redis.mget(...keys);
+      for (let i = 0; i < channelStates.length; i++) {
+        const pos = values[i];
+        if (pos) {
+          const parsed = JSON.parse(pos);
+          positions.push({ userId: channelStates[i].userId, ...parsed });
+        }
       }
     }
 
