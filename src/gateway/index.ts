@@ -1,8 +1,9 @@
 import { Server as SocketIOServer } from "socket.io";
 import type { Server as HttpServer } from "http";
 import crypto from "crypto";
+import { createAdapter } from "@socket.io/redis-adapter";
 import { env } from "../config/env.js";
-import { redisSub } from "../config/redis.js";
+import { redisPub, redisSub } from "../config/redis.js";
 import * as voicestateService from "../services/voicestate.js";
 
 interface VoiceGatewaySession {
@@ -40,6 +41,8 @@ export function createVoiceGateway(httpServer: HttpServer) {
     },
     transports: ["websocket", "polling"],
   });
+
+  io.adapter(createAdapter(redisPub, redisSub));
 
   const sessions = new Map<string, VoiceGatewaySession>();
 

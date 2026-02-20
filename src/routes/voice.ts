@@ -3,6 +3,47 @@ import type { FastifyInstance } from "fastify";
 import { z } from "zod";
 import * as voicestateService from "../services/voicestate.js";
 import { dispatchGuild } from "../utils/dispatch.js";
+import { redis } from "../config/redis.js";
+
+const VOICE_JOIN_RATE_LIMIT = `
+local key = KEYS[1]
+local now = tonumber(ARGV[1])
+local window_start = tonumber(ARGV[2])
+local max_requests = tonumber(ARGV[3])
+local ttl = tonumber(ARGV[4])
+local member = ARGV[5]
+
+redis.call('ZREMRANGEBYSCORE', key, 0, window_start)
+local count = redis.call('ZCARD', key)
+
+if count < max_requests then
+  redis.call('ZADD', key, now, member)
+  redis.call('EXPIRE', key, ttl)
+  return 1
+else
+  return 0
+end
+`;
+
+async function checkVoiceJoinRate(userId: string): Promise<boolean> {
+  const key = `rl:voicejoin:${userId}`;
+  const now = Date.now();
+  const windowStart = now - 10_000; // 10 second window
+  const member = `${now}:${Math.random()}`;
+
+  const allowed = await redis.eval(
+    VOICE_JOIN_RATE_LIMIT,
+    1,
+    key,
+    now.toString(),
+    windowStart.toString(),
+    "10", // max 10 requests
+    "11", // TTL slightly longer than window
+    member
+  );
+
+  return allowed === 1;
+}
 
 export async function voiceRoutes(app: FastifyInstance) {
   // Join voice channel
@@ -19,6 +60,15 @@ export async function voiceRoutes(app: FastifyInstance) {
         selfDeaf: z.boolean().optional(),
       })
       .parse(request.body);
+
+    const allowed = await checkVoiceJoinRate(body.userId);
+    if (!allowed) {
+      return reply.status(429).send({
+        statusCode: 429,
+        message: "You are being rate limited",
+        retryAfter: 10,
+      });
+    }
 
     const state = await voicestateService.joinVoiceChannel(
       body.userId,
