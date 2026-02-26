@@ -80,8 +80,7 @@ app.get("/health", async (_request, reply) => {
 const start = async () => {
   try {
     const server = app.server;
-    const io = createVoiceGateway(server);
-    app.decorate("io", io);
+    const wss = createVoiceGateway(server);
 
     await app.listen({ port: env.VOICE_PORT, host: env.VOICE_HOST });
     app.log.info(`Stream service listening on ${env.VOICE_HOST}:${env.VOICE_PORT}`);
@@ -89,7 +88,7 @@ const start = async () => {
     const shutdown = async (signal: string) => {
       app.log.info(`Received ${signal}, shutting down`);
       try {
-        io.close();
+        wss.close();
         await app.close();
         redisPub.disconnect();
         redisSub.disconnect();
