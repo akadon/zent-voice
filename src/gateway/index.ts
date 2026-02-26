@@ -36,6 +36,8 @@ function verifyToken(token: string): boolean {
   }
 }
 
+const MAX_CONNECTIONS = 100_000;
+
 export function createVoiceGateway(httpServer: HttpServer) {
   const io = new SocketIOServer(httpServer, {
     path: "/voice-gateway",
@@ -49,6 +51,7 @@ export function createVoiceGateway(httpServer: HttpServer) {
   io.adapter(createAdapter(redisPub, redisSub));
 
   const sessions = new Map<string, VoiceGatewaySession>();
+  const sessionsByUser = new Map<string, string>(); // userId → socketId
 
   // Authenticate connections
   io.use((socket, next) => {
@@ -64,6 +67,14 @@ export function createVoiceGateway(httpServer: HttpServer) {
       return next(new Error("unauthorized"));
     }
 
+    next();
+  });
+
+  // Connection limit check
+  io.use((socket, next) => {
+    if (sessions.size >= MAX_CONNECTIONS) {
+      return next(new Error("server_at_capacity"));
+    }
     next();
   });
 
@@ -122,6 +133,7 @@ export function createVoiceGateway(httpServer: HttpServer) {
         guildIds,
       };
       sessions.set(socket.id, session);
+      sessionsByUser.set(data.userId, socket.id);
 
       for (const guildId of guildIds) {
         socket.join(`guild:${guildId}`);
@@ -186,26 +198,30 @@ export function createVoiceGateway(httpServer: HttpServer) {
       const disconnectedSession = session;
       sessions.delete(socket.id);
 
-      // Check if a new session has already been created for this user
-      // (reconnect race condition). If so, skip cleanup.
-      const currentSession = Array.from(sessions.values()).find(
-        (s) => s.userId === disconnectedSession.userId
-      );
-      if (currentSession && currentSession.sessionId !== disconnectedSession.sessionId) {
+      // O(1) check if a new session already exists for this user
+      const currentSocketId = sessionsByUser.get(disconnectedSession.userId);
+      if (currentSocketId && currentSocketId !== socket.id) {
+        // Another session took over; skip cleanup
         return;
       }
+      sessionsByUser.delete(disconnectedSession.userId);
 
-      for (const guildId of disconnectedSession.guildIds) {
-        try {
-          const previous = await voicestateService.leaveVoiceChannel(disconnectedSession.userId, guildId);
-          if (previous) {
-            io.to(`guild:${guildId}`).emit("voice_event", {
-              event: "VOICE_STATE_UPDATE",
-              data: { userId: disconnectedSession.userId, guildId, channelId: null, sessionId: disconnectedSession.sessionId },
-            });
-          }
-        } catch {
-          // Log but don't let one guild failure skip others
+      // Batch DB cleanup: fire all leave operations concurrently
+      const results = await Promise.allSettled(
+        disconnectedSession.guildIds.map((guildId) =>
+          voicestateService.leaveVoiceChannel(disconnectedSession.userId, guildId)
+        )
+      );
+
+      // Emit events for successfully cleaned-up guilds
+      for (let i = 0; i < disconnectedSession.guildIds.length; i++) {
+        const result = results[i];
+        if (result.status === "fulfilled" && result.value) {
+          const guildId = disconnectedSession.guildIds[i];
+          io.to(`guild:${guildId}`).emit("voice_event", {
+            event: "VOICE_STATE_UPDATE",
+            data: { userId: disconnectedSession.userId, guildId, channelId: null, sessionId: disconnectedSession.sessionId },
+          });
         }
       }
     });

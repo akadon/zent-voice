@@ -25,10 +25,16 @@ else
 end
 `;
 
-async function checkVoiceJoinRate(userId: string): Promise<boolean> {
-  const key = `rl:voicejoin:${userId}`;
+async function checkSlidingWindowRate(
+  keyPrefix: string,
+  id: string,
+  maxRequests: number,
+  windowMs: number
+): Promise<boolean> {
+  const key = `rl:${keyPrefix}:${id}`;
   const now = Date.now();
-  const windowStart = now - 10_000; // 10 second window
+  const windowStart = now - windowMs;
+  const ttl = Math.ceil(windowMs / 1000) + 1;
   const member = `${now}:${Math.random()}`;
 
   const allowed = await redis.eval(
@@ -37,12 +43,24 @@ async function checkVoiceJoinRate(userId: string): Promise<boolean> {
     key,
     now.toString(),
     windowStart.toString(),
-    "10", // max 10 requests
-    "11", // TTL slightly longer than window
+    maxRequests.toString(),
+    ttl.toString(),
     member
   );
 
   return allowed === 1;
+}
+
+async function checkVoiceJoinRate(userId: string): Promise<boolean> {
+  return checkSlidingWindowRate("voicejoin", userId, 10, 10_000);
+}
+
+async function checkStateUpdateRate(userId: string): Promise<boolean> {
+  return checkSlidingWindowRate("voicestate", userId, 20, 10_000);
+}
+
+async function checkSpatialUpdateRate(userId: string): Promise<boolean> {
+  return checkSlidingWindowRate("spatial", userId, 10, 10_000);
 }
 
 export async function voiceRoutes(app: FastifyInstance) {
@@ -129,6 +147,15 @@ export async function voiceRoutes(app: FastifyInstance) {
       return reply.status(400).send({ statusCode: 400, message: "Empty body" });
     }
 
+    const allowed = await checkStateUpdateRate(userId);
+    if (!allowed) {
+      return reply.status(429).send({
+        statusCode: 429,
+        message: "You are being rate limited",
+        retryAfter: 10,
+      });
+    }
+
     const updated = await voicestateService.updateVoiceState(userId, guildId, body);
     await dispatchGuild(guildId, "VOICE_STATE_UPDATE", updated);
     return reply.send(updated);
@@ -145,6 +172,15 @@ export async function voiceRoutes(app: FastifyInstance) {
         z: z.number(),
       })
       .parse(request.body);
+
+    const allowed = await checkSpatialUpdateRate(body.userId);
+    if (!allowed) {
+      return reply.status(429).send({
+        statusCode: 429,
+        message: "You are being rate limited",
+        retryAfter: 10,
+      });
+    }
 
     const key = `spatial:${guildId}:${channelId}:${body.userId}`;
     await redis.set(key, JSON.stringify({ x: body.x, y: body.y, z: body.z }), "EX", 300);
@@ -205,6 +241,15 @@ export async function voiceRoutes(app: FastifyInstance) {
 
     if (!body || Object.keys(body).length === 0) {
       return reply.status(400).send({ statusCode: 400, message: "Empty body" });
+    }
+
+    const allowed = await checkStateUpdateRate(userId);
+    if (!allowed) {
+      return reply.status(429).send({
+        statusCode: 429,
+        message: "You are being rate limited",
+        retryAfter: 10,
+      });
     }
 
     const updated = await voicestateService.serverMuteDeafen(userId, guildId, body);
