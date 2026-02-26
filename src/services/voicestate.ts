@@ -1,12 +1,22 @@
-import { eq, and, sql } from "drizzle-orm";
-import { db, schema } from "../db/index.js";
-import { env } from "../config/env.js";
 import crypto from "crypto";
+import { voicestateRepository } from "../repositories/voicestate.repository.js";
+import { redis } from "../config/redis.js";
+import { config } from "../config/config.js";
 
 export class ApiError extends Error {
   constructor(public statusCode: number, message: string) {
     super(message);
   }
+}
+
+const VOICE_STATE_CACHE_TTL = 300; // 5 minutes
+
+function cacheKey(guildId: string) {
+  return `voicestates:${guildId}`;
+}
+
+async function invalidateGuildCache(guildId: string) {
+  await redis.del(cacheKey(guildId));
 }
 
 function createLiveKitToken(roomName: string, participantId: string, participantName: string, canPublish = true): string {
@@ -15,7 +25,7 @@ function createLiveKitToken(roomName: string, participantId: string, participant
   const now = Math.floor(Date.now() / 1000);
   const payload = Buffer.from(
     JSON.stringify({
-      iss: env.LIVEKIT_API_KEY,
+      iss: config.livekit.apiKey,
       sub: participantId,
       nbf: now,
       exp: now + 4 * 60 * 60,
@@ -34,7 +44,7 @@ function createLiveKitToken(roomName: string, participantId: string, participant
   ).toString("base64url");
 
   const signature = crypto
-    .createHmac("sha256", env.LIVEKIT_API_SECRET)
+    .createHmac("sha256", config.livekit.apiSecret)
     .update(`${header}.${payload}`)
     .digest("base64url");
 
@@ -55,40 +65,30 @@ export async function joinVoiceChannel(
     throw new ApiError(400, "Not a voice channel");
   }
 
-  await db.transaction(async (tx) => {
-    // Remove existing voice state for this user in this guild atomically
-    await tx
-      .delete(schema.voiceStates)
-      .where(and(eq(schema.voiceStates.userId, userId), eq(schema.voiceStates.guildId, guildId)));
+  await voicestateRepository.transaction(async (tx) => {
+    await voicestateRepository.deleteByUserAndGuild(userId, guildId, tx);
 
     if (userLimit && userLimit > 0) {
-      // Check count then insert (MySQL doesn't support INSERT...SELECT...RETURNING)
-      const [countResult] = await tx.execute(sql`
-        SELECT COUNT(*) as cnt FROM voice_states WHERE channel_id = ${channelId}
-      `);
-      const count = (countResult as any).cnt;
+      const count = await voicestateRepository.countByChannel(channelId, tx);
       if (count >= userLimit) {
         throw new ApiError(400, "Voice channel is full");
       }
-      await tx.insert(schema.voiceStates).values({
-        userId,
-        guildId,
-        channelId,
-        sessionId,
-        selfMute: options?.selfMute ?? false,
-        selfDeaf: options?.selfDeaf ?? false,
-      });
-    } else {
-      await tx.insert(schema.voiceStates).values({
-        userId,
-        guildId,
-        channelId,
-        sessionId,
-        selfMute: options?.selfMute ?? false,
-        selfDeaf: options?.selfDeaf ?? false,
-      });
     }
+
+    await voicestateRepository.insert(
+      {
+        userId,
+        guildId,
+        channelId,
+        sessionId,
+        selfMute: options?.selfMute ?? false,
+        selfDeaf: options?.selfDeaf ?? false,
+      },
+      tx
+    );
   });
+
+  await invalidateGuildCache(guildId);
 
   const roomName = `voice-${guildId}-${channelId}`;
   const livekitToken = createLiveKitToken(roomName, userId, username, channelType !== 13);
@@ -106,22 +106,16 @@ export async function joinVoiceChannel(
     selfVideo: false,
     suppress: channelType === 13,
     livekitToken,
-    livekitUrl: env.LIVEKIT_URL,
+    livekitUrl: config.livekit.url,
   };
 }
 
 export async function leaveVoiceChannel(userId: string, guildId: string) {
-  const [existing] = await db
-    .select()
-    .from(schema.voiceStates)
-    .where(and(eq(schema.voiceStates.userId, userId), eq(schema.voiceStates.guildId, guildId)))
-    .limit(1);
-
+  const existing = await voicestateRepository.findByUserAndGuild(userId, guildId);
   if (!existing) return null;
 
-  await db
-    .delete(schema.voiceStates)
-    .where(and(eq(schema.voiceStates.userId, userId), eq(schema.voiceStates.guildId, guildId)));
+  await voicestateRepository.deleteByUserAndGuild(userId, guildId);
+  await invalidateGuildCache(guildId);
 
   return existing;
 }
@@ -136,11 +130,10 @@ export async function updateVoiceState(
     selfVideo?: boolean;
   }
 ) {
-  const condition = and(eq(schema.voiceStates.userId, userId), eq(schema.voiceStates.guildId, guildId));
-  await db.update(schema.voiceStates).set(data).where(condition);
-  const [updated] = await db.select().from(schema.voiceStates).where(condition);
-
+  const updated = await voicestateRepository.update(userId, guildId, data);
   if (!updated) throw new ApiError(404, "Not in a voice channel");
+
+  await invalidateGuildCache(guildId);
   return updated;
 }
 
@@ -149,24 +142,30 @@ export async function serverMuteDeafen(
   guildId: string,
   data: { mute?: boolean; deaf?: boolean }
 ) {
-  const condition = and(eq(schema.voiceStates.userId, userId), eq(schema.voiceStates.guildId, guildId));
-  await db.update(schema.voiceStates).set(data).where(condition);
-  const [updated] = await db.select().from(schema.voiceStates).where(condition);
-
+  const updated = await voicestateRepository.update(userId, guildId, data);
   if (!updated) throw new ApiError(404, "User not in a voice channel");
+
+  await invalidateGuildCache(guildId);
   return updated;
 }
 
 export async function getChannelVoiceStates(channelId: string) {
-  return db
-    .select()
-    .from(schema.voiceStates)
-    .where(eq(schema.voiceStates.channelId, channelId));
+  return voicestateRepository.findByChannel(channelId);
 }
 
 export async function getGuildVoiceStates(guildId: string) {
-  return db
-    .select()
-    .from(schema.voiceStates)
-    .where(eq(schema.voiceStates.guildId, guildId));
+  // Check Redis cache first
+  const cached = await redis.get(cacheKey(guildId));
+  if (cached) {
+    return JSON.parse(cached);
+  }
+
+  const states = await voicestateRepository.findByGuild(guildId);
+
+  // Warm cache
+  if (states.length > 0) {
+    await redis.set(cacheKey(guildId), JSON.stringify(states), "EX", VOICE_STATE_CACHE_TTL);
+  }
+
+  return states;
 }

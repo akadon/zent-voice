@@ -3,6 +3,7 @@ import type { Server as HttpServer } from "http";
 import crypto from "crypto";
 import { createAdapter } from "@socket.io/redis-adapter";
 import { env } from "../config/env.js";
+import { config } from "../config/config.js";
 import { redisPub, redisSub } from "../config/redis.js";
 import * as voicestateService from "../services/voicestate.js";
 
@@ -39,7 +40,7 @@ export function createVoiceGateway(httpServer: HttpServer) {
   const io = new SocketIOServer(httpServer, {
     path: "/voice-gateway",
     cors: {
-      origin: env.CORS_ORIGIN || "http://localhost:3000",
+      origin: config.cors.origins,
       methods: ["GET", "POST"],
     },
     transports: ["websocket", "polling"],

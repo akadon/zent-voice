@@ -3,6 +3,7 @@ import cors from "@fastify/cors";
 import crypto from "crypto";
 import { createServer } from "http";
 import { env } from "./config/env.js";
+import { config } from "./config/config.js";
 import { voiceRoutes } from "./routes/voice.js";
 import { stageRoutes } from "./routes/stage.js";
 import { soundboardRoutes } from "./routes/soundboard.js";
@@ -25,7 +26,7 @@ const app = Fastify({
 });
 
 await app.register(cors, {
-  origin: env.CORS_ORIGIN || "http://localhost:3000",
+  origin: config.cors.origins,
   credentials: true,
 });
 

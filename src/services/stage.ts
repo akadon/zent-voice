@@ -1,5 +1,5 @@
-import { eq, and } from "drizzle-orm";
-import { db, schema } from "../db/index.js";
+import { stageRepository } from "../repositories/stage.repository.js";
+import { voicestateRepository } from "../repositories/voicestate.repository.js";
 import { ApiError } from "./voicestate.js";
 import { generateId } from "../utils/snowflake.js";
 import { dispatchGuild } from "../utils/dispatch.js";
@@ -20,20 +20,11 @@ export const StagePrivacyLevel = {
 } as const;
 
 export async function getStageInstance(channelId: string): Promise<StageInstance | null> {
-  const [instance] = await db
-    .select()
-    .from(schema.stageInstances)
-    .where(eq(schema.stageInstances.channelId, channelId))
-    .limit(1);
-
-  return instance ?? null;
+  return stageRepository.findByChannel(channelId);
 }
 
 export async function getGuildStageInstances(guildId: string): Promise<StageInstance[]> {
-  return db
-    .select()
-    .from(schema.stageInstances)
-    .where(eq(schema.stageInstances.guildId, guildId));
+  return stageRepository.findByGuild(guildId);
 }
 
 export async function createStageInstance(
@@ -46,29 +37,21 @@ export async function createStageInstance(
     guildScheduledEventId?: string;
   }
 ): Promise<StageInstance> {
-  const existing = await getStageInstance(channelId);
+  const existing = await stageRepository.findByChannel(channelId);
   if (existing) {
     throw new ApiError(400, "Stage instance already exists for this channel");
   }
 
   const id = generateId();
-  await db
-    .insert(schema.stageInstances)
-    .values({
-      id,
-      guildId,
-      channelId,
-      topic: data.topic,
-      privacyLevel: data.privacyLevel ?? StagePrivacyLevel.GUILD_ONLY,
-      guildScheduledEventId: data.guildScheduledEventId ?? null,
-      discoverableDisabled: false,
-    });
-
-  const [instance] = await db
-    .select()
-    .from(schema.stageInstances)
-    .where(eq(schema.stageInstances.id, id))
-    .limit(1);
+  const instance = await stageRepository.insert({
+    id,
+    guildId,
+    channelId,
+    topic: data.topic,
+    privacyLevel: data.privacyLevel ?? StagePrivacyLevel.GUILD_ONLY,
+    guildScheduledEventId: data.guildScheduledEventId ?? null,
+    discoverableDisabled: false,
+  });
 
   if (!instance) {
     throw new ApiError(500, "Failed to create stage instance");
@@ -84,20 +67,11 @@ export async function updateStageInstance(
     privacyLevel?: number;
   }
 ): Promise<StageInstance> {
-  await db
-    .update(schema.stageInstances)
-    .set({
-      ...(data.topic !== undefined && { topic: data.topic }),
-      ...(data.privacyLevel !== undefined && { privacyLevel: data.privacyLevel }),
-    })
-    .where(eq(schema.stageInstances.channelId, channelId));
+  const updateData: Partial<{ topic: string; privacyLevel: number }> = {};
+  if (data.topic !== undefined) updateData.topic = data.topic;
+  if (data.privacyLevel !== undefined) updateData.privacyLevel = data.privacyLevel;
 
-  const [instance] = await db
-    .select()
-    .from(schema.stageInstances)
-    .where(eq(schema.stageInstances.channelId, channelId))
-    .limit(1);
-
+  const instance = await stageRepository.update(channelId, updateData);
   if (!instance) {
     throw new ApiError(404, "Stage instance not found");
   }
@@ -106,20 +80,12 @@ export async function updateStageInstance(
 }
 
 export async function deleteStageInstance(channelId: string): Promise<StageInstance> {
-  const [instance] = await db
-    .select()
-    .from(schema.stageInstances)
-    .where(eq(schema.stageInstances.channelId, channelId))
-    .limit(1);
-
+  const instance = await stageRepository.findByChannel(channelId);
   if (!instance) {
     throw new ApiError(404, "Stage instance not found");
   }
 
-  await db
-    .delete(schema.stageInstances)
-    .where(eq(schema.stageInstances.channelId, channelId));
-
+  await stageRepository.deleteByChannel(channelId);
   return instance;
 }
 
@@ -128,19 +94,8 @@ export async function requestToSpeak(
   guildId: string,
   channelId: string
 ): Promise<void> {
-  const [voiceState] = await db
-    .select()
-    .from(schema.voiceStates)
-    .where(
-      and(
-        eq(schema.voiceStates.userId, userId),
-        eq(schema.voiceStates.guildId, guildId),
-        eq(schema.voiceStates.channelId, channelId)
-      )
-    )
-    .limit(1);
-
-  if (!voiceState) {
+  const voiceState = await voicestateRepository.findByUserAndGuild(userId, guildId);
+  if (!voiceState || voiceState.channelId !== channelId) {
     throw new ApiError(400, "User is not in this voice channel");
   }
 
@@ -157,16 +112,7 @@ export async function inviteToSpeak(
   guildId: string,
   channelId: string
 ): Promise<void> {
-  await db
-    .update(schema.voiceStates)
-    .set({ suppress: false })
-    .where(
-      and(
-        eq(schema.voiceStates.userId, targetUserId),
-        eq(schema.voiceStates.guildId, guildId),
-        eq(schema.voiceStates.channelId, channelId)
-      )
-    );
+  await voicestateRepository.update(targetUserId, guildId, { suppress: false });
 }
 
 export async function moveToAudience(
@@ -174,42 +120,13 @@ export async function moveToAudience(
   guildId: string,
   channelId: string
 ): Promise<void> {
-  await db
-    .update(schema.voiceStates)
-    .set({ suppress: true })
-    .where(
-      and(
-        eq(schema.voiceStates.userId, targetUserId),
-        eq(schema.voiceStates.guildId, guildId),
-        eq(schema.voiceStates.channelId, channelId)
-      )
-    );
+  await voicestateRepository.update(targetUserId, guildId, { suppress: true });
 }
 
 export async function getSpeakers(channelId: string): Promise<string[]> {
-  const voiceStates = await db
-    .select({ userId: schema.voiceStates.userId })
-    .from(schema.voiceStates)
-    .where(
-      and(
-        eq(schema.voiceStates.channelId, channelId),
-        eq(schema.voiceStates.suppress, false)
-      )
-    );
-
-  return voiceStates.map((vs) => vs.userId);
+  return voicestateRepository.findByChannelAndSuppress(channelId, false);
 }
 
 export async function getAudience(channelId: string): Promise<string[]> {
-  const voiceStates = await db
-    .select({ userId: schema.voiceStates.userId })
-    .from(schema.voiceStates)
-    .where(
-      and(
-        eq(schema.voiceStates.channelId, channelId),
-        eq(schema.voiceStates.suppress, true)
-      )
-    );
-
-  return voiceStates.map((vs) => vs.userId);
+  return voicestateRepository.findByChannelAndSuppress(channelId, true);
 }

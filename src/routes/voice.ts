@@ -47,7 +47,6 @@ async function checkVoiceJoinRate(userId: string): Promise<boolean> {
 
 export async function voiceRoutes(app: FastifyInstance) {
   // Join voice channel
-  // Caller (zent-server or direct) must pass channel info since we don't own the channels table
   app.post("/voice/:guildId/:channelId/join", async (request, reply) => {
     const { guildId, channelId } = request.params as { guildId: string; channelId: string };
     const body = z
@@ -148,7 +147,6 @@ export async function voiceRoutes(app: FastifyInstance) {
       .parse(request.body);
 
     const key = `spatial:${guildId}:${channelId}:${body.userId}`;
-    const { redis } = await import("../config/redis.js");
     await redis.set(key, JSON.stringify({ x: body.x, y: body.y, z: body.z }), "EX", 300);
 
     await dispatchGuild(guildId, "VOICE_SPATIAL_UPDATE", {
@@ -161,22 +159,32 @@ export async function voiceRoutes(app: FastifyInstance) {
     return reply.status(204).send();
   });
 
-  // Get spatial audio positions for a channel
+  // Get spatial audio positions for a channel (batch pipeline)
   app.get("/voice/:guildId/:channelId/spatial/positions", async (request, reply) => {
     const { guildId, channelId } = request.params as { guildId: string; channelId: string };
 
     const states = await voicestateService.getGuildVoiceStates(guildId);
     const channelStates = states.filter((s: any) => s.channelId === channelId);
 
-    const { redis } = await import("../config/redis.js");
+    if (channelStates.length === 0) {
+      return reply.send([]);
+    }
+
+    const keys = channelStates.map((s: any) => `spatial:${guildId}:${channelId}:${s.userId}`);
+
+    // Batch all spatial reads in one pipeline round-trip
+    const pipeline = redis.pipeline();
+    for (const key of keys) {
+      pipeline.get(key);
+    }
+    const results = await pipeline.exec();
+
     const positions: Array<{ userId: string; x: number; y: number; z: number }> = [];
-    if (channelStates.length > 0) {
-      const keys = channelStates.map((s: any) => `spatial:${guildId}:${channelId}:${s.userId}`);
-      const values = await redis.mget(...keys);
+    if (results) {
       for (let i = 0; i < channelStates.length; i++) {
-        const pos = values[i];
-        if (pos) {
-          const parsed = JSON.parse(pos);
+        const [err, val] = results[i] ?? [];
+        if (!err && val) {
+          const parsed = JSON.parse(val as string);
           positions.push({ userId: channelStates[i].userId, ...parsed });
         }
       }
