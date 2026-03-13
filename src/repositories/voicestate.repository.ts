@@ -28,7 +28,7 @@ export const voicestateRepository = {
   async countByChannel(channelId: string, tx?: any) {
     const executor = tx ?? db;
     const [result] = await executor.execute(sql`
-      SELECT COUNT(*) as cnt FROM voice_states WHERE channel_id = ${channelId}
+      SELECT COUNT(*) as cnt FROM voice_states WHERE channel_id = ${channelId} FOR UPDATE
     `);
     return (result as any).cnt as number;
   },

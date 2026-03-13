@@ -1,6 +1,8 @@
 import { soundboardRepository } from "../repositories/soundboard.repository.js";
 import { ApiError } from "./voicestate.js";
 import { generateId } from "../utils/snowflake.js";
+import { db } from "../db/index.js";
+import { sql } from "drizzle-orm";
 
 export interface SoundboardSound {
   id: string;
@@ -41,24 +43,29 @@ export async function createSound(
     throw new ApiError(400, `Sound name must be ${MAX_SOUND_NAME_LENGTH} characters or less`);
   }
 
-  const existingSounds = await soundboardRepository.findByGuild(guildId);
   const soundLimit = getSoundLimit(premiumTier);
-
-  if (existingSounds.length >= soundLimit) {
-    throw new ApiError(400, `This server has reached the maximum of ${soundLimit} sounds`);
-  }
-
   const id = generateId();
-  const sound = await soundboardRepository.insert({
-    id,
-    guildId,
-    name: data.name,
-    soundUrl: data.soundUrl,
-    volume: Math.min(100, Math.max(0, data.volume ?? 100)),
-    emojiId: data.emojiId ?? null,
-    emojiName: data.emojiName ?? null,
-    userId,
-    available: true,
+
+  const sound = await db.transaction(async (tx) => {
+    // Lock existing rows for this guild to prevent concurrent inserts exceeding the limit
+    await tx.execute(sql`
+      SELECT id FROM soundboard_sounds WHERE guild_id = ${guildId} FOR UPDATE
+    `);
+
+    const existingSounds = await soundboardRepository.findByGuild(guildId);
+    if (existingSounds.length >= soundLimit) {
+      throw new ApiError(400, `This server has reached the maximum of ${soundLimit} sounds`);
+    }
+
+    await tx.execute(sql`
+      INSERT INTO soundboard_sounds (id, guild_id, name, sound_url, volume, emoji_id, emoji_name, user_id, available, created_at)
+      VALUES (${id}, ${guildId}, ${data.name}, ${data.soundUrl}, ${Math.min(100, Math.max(0, data.volume ?? 100))}, ${data.emojiId ?? null}, ${data.emojiName ?? null}, ${userId}, true, NOW())
+    `);
+
+    const [row] = await tx.execute(sql`
+      SELECT * FROM soundboard_sounds WHERE id = ${id} LIMIT 1
+    `);
+    return row as unknown as SoundboardSound | null;
   });
 
   if (!sound) {

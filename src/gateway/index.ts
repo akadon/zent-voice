@@ -3,46 +3,24 @@ import type { Server as HttpServer } from "http";
 import { URL } from "url";
 import crypto from "crypto";
 import { env } from "../config/env.js";
-import { config } from "../config/config.js";
 import { redisSub } from "../config/redis.js";
 import * as voicestateService from "../services/voicestate.js";
+
+const logger = {
+  warn(msg: string, data?: Record<string, unknown>) {
+    const entry = { level: "warn", time: Date.now(), name: "voice-gateway", msg, ...data };
+    process.stderr.write(JSON.stringify(entry) + "\n");
+  },
+  error(msg: string, data?: Record<string, unknown>) {
+    const entry = { level: "error", time: Date.now(), name: "voice-gateway", msg, ...data };
+    process.stderr.write(JSON.stringify(entry) + "\n");
+  },
+};
 
 interface VoiceGatewaySession {
   userId: string;
   sessionId: string;
   guildIds: string[];
-}
-
-function verifyToken(token: string): boolean {
-  const keyBuf = Buffer.from(env.INTERNAL_API_KEY);
-  const tokenBuf = Buffer.from(token);
-  if (keyBuf.length === tokenBuf.length && crypto.timingSafeEqual(keyBuf, tokenBuf)) return true;
-
-  try {
-    const parts = token.split(".");
-    if (parts.length !== 3) return false;
-    const sig = crypto
-      .createHmac("sha256", env.AUTH_SECRET)
-      .update(`${parts[0]}.${parts[1]}`)
-      .digest("base64url");
-    if (sig !== parts[2]) return false;
-    const payload = JSON.parse(Buffer.from(parts[1], "base64url").toString());
-    if (payload.exp && payload.exp < Math.floor(Date.now() / 1000)) return false;
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-function extractUserId(token: string): string | null {
-  try {
-    const parts = token.split(".");
-    if (parts.length !== 3) return null;
-    const payload = JSON.parse(Buffer.from(parts[1], "base64url").toString());
-    return payload.userId ?? null;
-  } catch {
-    return null;
-  }
 }
 
 const MAX_CONNECTIONS = 100_000;
@@ -99,16 +77,29 @@ export function createVoiceGateway(httpServer: HttpServer): WebSocketServer {
         return;
       }
 
-      // Extract token from query string for auth
+      // Extract token from query string for auth — only the internal API key is accepted
+      // Direct client connections with user JWTs are not allowed; the main API server
+      // proxies gateway connections on behalf of users.
       const url = new URL(request.url!, `http://${request.headers.host}`);
       const token = url.searchParams.get("token");
-      if (!token || !verifyToken(token)) {
+      if (!token) {
         socket.write("HTTP/1.1 401 Unauthorized\r\n\r\n");
         socket.destroy();
         return;
       }
 
-      (request as any).__token = token;
+      const keyBuf = Buffer.from(env.INTERNAL_API_KEY);
+      const tokenBuf = Buffer.from(token);
+      const isInternalKey = keyBuf.length === tokenBuf.length && crypto.timingSafeEqual(keyBuf, tokenBuf);
+      if (!isInternalKey) {
+        logger.warn("WebSocket connection rejected: non-internal token", {
+          ip: request.socket.remoteAddress,
+        });
+        socket.write("HTTP/1.1 403 Forbidden\r\n\r\n");
+        socket.destroy();
+        return;
+      }
+
       wss.handleUpgrade(request, socket, head, (ws) => {
         wss.emit("connection", ws, request);
       });
@@ -122,14 +113,16 @@ export function createVoiceGateway(httpServer: HttpServer): WebSocketServer {
       const parsed = JSON.parse(message) as { event: string; data: unknown };
       const guildId = channel.replace("gateway:guild:", "");
       broadcastToGuild(guildId, { type: "voice_event", ...parsed });
-    } catch {
-      // Ignore malformed messages
+    } catch (err) {
+      logger.error("Failed to parse Redis gateway message", {
+        channel,
+        error: err instanceof Error ? err.message : String(err),
+      });
     }
   });
 
-  wss.on("connection", (ws: WebSocket, request: any) => {
+  wss.on("connection", (ws: WebSocket, _request: any) => {
     let session: VoiceGatewaySession | null = null;
-    const token = request.__token as string;
 
     ws.on("message", async (raw: Buffer | string) => {
       try {
@@ -146,16 +139,16 @@ export function createVoiceGateway(httpServer: HttpServer): WebSocketServer {
               return;
             }
 
-            // Validate userId matches token
-            if (token !== env.INTERNAL_API_KEY) {
-              const tokenUserId = extractUserId(token);
-              if (tokenUserId && tokenUserId !== data.userId) {
-                send(ws, { type: "error", code: 4002, message: "userId mismatch" });
-                return;
-              }
+            // Connection is already authenticated as internal API key (enforced at upgrade).
+            // Log suspicious guild list sizes for monitoring.
+            const guildIds = data.guildIds.slice(0, 200);
+            if (data.guildIds.length > 200) {
+              logger.warn("Identify with excessive guildIds, truncated to 200", {
+                userId: data.userId,
+                originalCount: data.guildIds.length,
+              });
             }
 
-            const guildIds = data.guildIds.slice(0, 200);
             session = { userId: data.userId, sessionId: data.sessionId, guildIds };
             sessions.set(ws, session);
             sessionsByUser.set(data.userId, ws);
@@ -222,8 +215,11 @@ export function createVoiceGateway(httpServer: HttpServer): WebSocketServer {
             break;
           }
         }
-      } catch {
-        // Ignore malformed messages
+      } catch (err) {
+        logger.error("Failed to parse or handle WebSocket message", {
+          userId: session?.userId,
+          error: err instanceof Error ? err.message : String(err),
+        });
       }
     });
 
@@ -234,11 +230,19 @@ export function createVoiceGateway(httpServer: HttpServer): WebSocketServer {
       }
 
       const disconnectedSession = session;
+      session = null;
       sessions.delete(ws);
 
-      // Check if another session already took over for this user
+      // Atomic compare-and-delete: only remove from sessionsByUser if this ws
+      // is still the current one (prevents race with a new connection for the same user)
       const currentWs = sessionsByUser.get(disconnectedSession.userId);
-      if (currentWs && currentWs !== ws) return;
+      if (currentWs !== ws) {
+        // Another session already took over — just clean up rooms and return
+        for (const guildId of disconnectedSession.guildIds) {
+          removeFromGuild(guildId, ws);
+        }
+        return;
+      }
       sessionsByUser.delete(disconnectedSession.userId);
 
       // Remove from rooms
@@ -266,7 +270,12 @@ export function createVoiceGateway(httpServer: HttpServer): WebSocketServer {
       }
     });
 
-    ws.on("error", () => {});
+    ws.on("error", (err) => {
+      logger.error("WebSocket error", {
+        userId: session?.userId,
+        error: err.message,
+      });
+    });
   });
 
   return wss;

@@ -7,6 +7,7 @@ import {
   datetime,
   primaryKey,
   index,
+  uniqueIndex,
 } from "drizzle-orm/mysql-core";
 import { sql } from "drizzle-orm";
 
@@ -46,6 +47,7 @@ export const stageInstances = mysqlTable(
   },
   (table) => [
     index("stage_instances_guild_idx").on(table.guildId),
+    uniqueIndex("stage_instances_channel_id_unique").on(table.channelId),
   ]
 );
 

@@ -70,7 +70,7 @@ export async function voiceRoutes(app: FastifyInstance) {
     const body = z
       .object({
         userId: z.string(),
-        username: z.string(),
+        username: z.string().min(1).max(32),
         channelType: z.number(),
         userLimit: z.number().nullable().optional(),
         selfMute: z.boolean().optional(),
@@ -131,9 +131,22 @@ export async function voiceRoutes(app: FastifyInstance) {
     return reply.send(states);
   });
 
-  // Update voice state
+  // Update voice state (self-updates only, unless x-admin is set)
   app.patch("/voice/:guildId/:userId", async (request, reply) => {
     const { guildId, userId } = request.params as { guildId: string; userId: string };
+
+    // Permission check: x-user-id must match the target userId for self-updates
+    const requestingUserId = request.headers["x-user-id"] as string | undefined;
+    const isAdmin = request.headers["x-admin"] === "true";
+    if (!isAdmin) {
+      if (!requestingUserId || requestingUserId !== userId) {
+        return reply.status(403).send({
+          statusCode: 403,
+          message: "Cannot modify another user's voice state",
+        });
+      }
+    }
+
     const body = z
       .object({
         selfMute: z.boolean().optional(),
@@ -167,9 +180,9 @@ export async function voiceRoutes(app: FastifyInstance) {
     const body = z
       .object({
         userId: z.string(),
-        x: z.number(),
-        y: z.number(),
-        z: z.number(),
+        x: z.number().int().min(-10000).max(10000),
+        y: z.number().int().min(-10000).max(10000),
+        z: z.number().int().min(-10000).max(10000),
       })
       .parse(request.body);
 
@@ -229,9 +242,19 @@ export async function voiceRoutes(app: FastifyInstance) {
     return reply.send(positions);
   });
 
-  // Server mute/deafen
+  // Server mute/deafen (admin action only)
   app.patch("/voice/:guildId/:userId/server", async (request, reply) => {
     const { guildId, userId } = request.params as { guildId: string; userId: string };
+
+    // Permission check: server mute/deafen is an admin-only action
+    const isAdmin = request.headers["x-admin"] === "true";
+    if (!isAdmin) {
+      return reply.status(403).send({
+        statusCode: 403,
+        message: "Admin permission required for server mute/deafen",
+      });
+    }
+
     const body = z
       .object({
         mute: z.boolean().optional(),

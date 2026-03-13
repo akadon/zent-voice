@@ -2,6 +2,53 @@ import type { FastifyInstance } from "fastify";
 import { z } from "zod";
 import * as soundboardService from "../services/soundboard.js";
 import { dispatchGuild } from "../utils/dispatch.js";
+import { redis } from "../config/redis.js";
+
+const RATE_LIMIT_SCRIPT = `
+local key = KEYS[1]
+local now = tonumber(ARGV[1])
+local window_start = tonumber(ARGV[2])
+local max_requests = tonumber(ARGV[3])
+local ttl = tonumber(ARGV[4])
+local member = ARGV[5]
+
+redis.call('ZREMRANGEBYSCORE', key, 0, window_start)
+local count = redis.call('ZCARD', key)
+
+if count < max_requests then
+  redis.call('ZADD', key, now, member)
+  redis.call('EXPIRE', key, ttl)
+  return 1
+else
+  return 0
+end
+`;
+
+async function checkSlidingWindowRate(
+  keyPrefix: string,
+  id: string,
+  maxRequests: number,
+  windowMs: number
+): Promise<boolean> {
+  const key = `rl:${keyPrefix}:${id}`;
+  const now = Date.now();
+  const windowStart = now - windowMs;
+  const ttl = Math.ceil(windowMs / 1000) + 1;
+  const member = `${now}:${Math.random()}`;
+
+  const allowed = await redis.eval(
+    RATE_LIMIT_SCRIPT,
+    1,
+    key,
+    now.toString(),
+    windowStart.toString(),
+    maxRequests.toString(),
+    ttl.toString(),
+    member
+  );
+
+  return allowed === 1;
+}
 
 export async function soundboardRoutes(app: FastifyInstance) {
   // Get guild sounds
@@ -29,12 +76,23 @@ export async function soundboardRoutes(app: FastifyInstance) {
         userId: z.string(),
         premiumTier: z.number().default(0),
         name: z.string().min(1).max(32),
-        soundUrl: z.string().url(),
+        soundUrl: z.string().url().refine((url) => url.startsWith("https://"), {
+          message: "Only HTTPS URLs are allowed",
+        }),
         volume: z.number().int().min(0).max(100).optional(),
         emojiId: z.string().optional(),
         emojiName: z.string().optional(),
       })
       .parse(request.body);
+
+    const allowed = await checkSlidingWindowRate("soundcreate", guildId, 5, 10_000);
+    if (!allowed) {
+      return reply.status(429).send({
+        statusCode: 429,
+        message: "You are being rate limited",
+        retryAfter: 10,
+      });
+    }
 
     const sound = await soundboardService.createSound(guildId, body.userId, body.premiumTier, {
       name: body.name,
@@ -64,6 +122,15 @@ export async function soundboardRoutes(app: FastifyInstance) {
       return reply.status(400).send({ statusCode: 400, message: "Empty body" });
     }
 
+    const allowed = await checkSlidingWindowRate("soundupdate", guildId, 10, 10_000);
+    if (!allowed) {
+      return reply.status(429).send({
+        statusCode: 429,
+        message: "You are being rate limited",
+        retryAfter: 10,
+      });
+    }
+
     const sound = await soundboardService.updateSound(guildId, soundId, body);
     await dispatchGuild(guildId, "GUILD_SOUNDBOARD_SOUND_UPDATE", sound);
     return reply.send(sound);
@@ -88,6 +155,15 @@ export async function soundboardRoutes(app: FastifyInstance) {
         guildId: z.string(),
       })
       .parse(request.body);
+
+    const allowed = await checkSlidingWindowRate("soundsend", body.userId, 10, 10_000);
+    if (!allowed) {
+      return reply.status(429).send({
+        statusCode: 429,
+        message: "You are being rate limited",
+        retryAfter: 10,
+      });
+    }
 
     const sound = await soundboardService.getSound(body.soundId);
     if (!sound) {

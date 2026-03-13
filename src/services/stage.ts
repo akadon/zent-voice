@@ -3,6 +3,8 @@ import { voicestateRepository } from "../repositories/voicestate.repository.js";
 import { ApiError } from "./voicestate.js";
 import { generateId } from "../utils/snowflake.js";
 import { dispatchGuild } from "../utils/dispatch.js";
+import { db } from "../db/index.js";
+import { sql } from "drizzle-orm";
 
 export interface StageInstance {
   id: string;
@@ -37,20 +39,27 @@ export async function createStageInstance(
     guildScheduledEventId?: string;
   }
 ): Promise<StageInstance> {
-  const existing = await stageRepository.findByChannel(channelId);
-  if (existing) {
-    throw new ApiError(400, "Stage instance already exists for this channel");
-  }
-
   const id = generateId();
-  const instance = await stageRepository.insert({
-    id,
-    guildId,
-    channelId,
-    topic: data.topic,
-    privacyLevel: data.privacyLevel ?? StagePrivacyLevel.GUILD_ONLY,
-    guildScheduledEventId: data.guildScheduledEventId ?? null,
-    discoverableDisabled: false,
+
+  const instance = await db.transaction(async (tx) => {
+    // Lock any existing row for this channel to prevent concurrent creation
+    const [existing] = await tx.execute(sql`
+      SELECT id FROM stage_instances WHERE channel_id = ${channelId} FOR UPDATE
+    `);
+    if (existing) {
+      throw new ApiError(400, "Stage instance already exists for this channel");
+    }
+
+    const privacyLevel = data.privacyLevel ?? StagePrivacyLevel.GUILD_ONLY;
+    await tx.execute(sql`
+      INSERT INTO stage_instances (id, guild_id, channel_id, topic, privacy_level, guild_scheduled_event_id, discoverable_disabled)
+      VALUES (${id}, ${guildId}, ${channelId}, ${data.topic}, ${privacyLevel}, ${data.guildScheduledEventId ?? null}, false)
+    `);
+
+    const [row] = await tx.execute(sql`
+      SELECT * FROM stage_instances WHERE id = ${id} LIMIT 1
+    `);
+    return row as unknown as StageInstance | null;
   });
 
   if (!instance) {
